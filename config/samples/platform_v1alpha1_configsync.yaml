@@ -1,0 +1,14 @@
+apiVersion: platform.saravanan.dev/v1alpha1
+kind: ConfigSync
+metadata:
+  labels:
+    app.kubernetes.io/name: configsync-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: configsync-sample
+spec:
+  targetNamespaces:
+    - team-a
+    - team-b
+  data:
+    LOG_LEVEL: info
+    FEATURE_FLAGS: "beta=true"

@@ -1,0 +1,44 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - platform.saravanan.dev
+  resources:
+  - configsyncs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - platform.saravanan.dev
+  resources:
+  - configsyncs/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - platform.saravanan.dev
+  resources:
+  - configsyncs/status
+  verbs:
+  - get
+  - patch
+  - update
