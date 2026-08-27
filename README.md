@@ -1,135 +1,137 @@
 # configsync-operator
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+A Kubernetes operator that keeps a ConfigMap materialized across a set of
+namespaces, and puts it back if someone deletes it by hand.
 
-## Getting Started
+I built this as a learning project to get past reading about controller-runtime
+and actually write one: a CRD, a reconciler, envtest coverage, and a `kind`
+cluster to poke at by hand.
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+## Why
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+The recurring pattern this solves: you have one config payload (a log level, a
+feature flag set, some shared value) that needs to exist identically in
+several namespaces, and you want it to *stay* that way even if someone
+`kubectl delete`s the ConfigMap in one of them, or if the list of namespaces
+that need it changes over time. `ConfigSync` is a single CRD you point at a
+list of target namespaces and a data map; the controller keeps a ConfigMap
+matching that spec in every one of them, recreates it if it goes missing, and
+removes it from namespaces you drop from the list.
 
-```sh
-make docker-build docker-push IMG=<some-registry>/configsync-operator:tag
+The reconciler is level-triggered, the way controller-runtime expects: it
+doesn't care *why* it was invoked, only what the current spec says. Every call
+re-derives the desired state and reconciles the cluster toward it, whether
+that means creating a ConfigMap that's missing, overwriting one that's
+drifted, or deleting one that's no longer wanted.
+
+## CRD spec
+
+`ConfigSync` is cluster-scoped. `spec.targetNamespaces` needs at least one
+entry, `spec.data` needs at least one key.
+
+```yaml
+apiVersion: platform.saravanan.dev/v1alpha1
+kind: ConfigSync
+metadata:
+  name: configsync-sample
+spec:
+  targetNamespaces:
+    - team-a
+    - team-b
+  data:
+    LOG_LEVEL: info
+    FEATURE_FLAGS: "beta=true"
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+Applying this creates a ConfigMap named `configsync-sample` in both `team-a`
+and `team-b`, each carrying `spec.data` verbatim plus two tracking labels
+(`platform.saravanan.dev/managed-by`, `platform.saravanan.dev/configsync`) and
+a controller ownerRef back to the ConfigSync. Drop `team-b` from the list and
+the next reconcile deletes the ConfigMap there; delete the ConfigMap in
+`team-a` by hand and the next reconcile puts it back.
 
-**Install the CRDs into the cluster:**
+`status.conditions` carries a `Ready` condition: `True` once every target
+namespace is converged, `False` if a namespace already has a ConfigMap by
+that name that this controller didn't create — the controller refuses to
+adopt or overwrite a ConfigMap it doesn't own. `status.syncedNamespaces` lists
+the namespaces currently converged, and `status.observedGeneration` tracks
+which version of the spec that status reflects.
+
+## Running it locally against `kind`
 
 ```sh
+# 1. Spin up a local cluster
+kind create cluster
+
+# 2. Install the CRD
 make install
+
+# 3. Run the controller in the foreground (not deployed as a Pod)
+make run
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+With that running, in another terminal:
 
 ```sh
-make deploy IMG=<some-registry>/configsync-operator:tag
-```
+# Create the namespaces the sample targets
+kubectl create namespace team-a
+kubectl create namespace team-b
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
-
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
+# Apply the sample ConfigSync
 kubectl apply -k config/samples/
+
+# Confirm the ConfigMap landed in both namespaces
+kubectl get configmap configsync-sample -n team-a -o yaml
+kubectl get configmap configsync-sample -n team-b -o yaml
+
+# Check status
+kubectl get configsync configsync-sample -o yaml
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
+To tear down: `kubectl delete -k config/samples/`, `make uninstall`, then
+`kind delete cluster`.
 
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
+## What's verified
 
-```sh
-kubectl delete -k config/samples/
-```
+Unit/integration coverage runs against envtest (real etcd + kube-apiserver,
+no controller-manager) and covers:
 
-**Delete the APIs(CRDs) from the cluster:**
+- Creating the ConfigMap in every target namespace with the right data,
+  labels, and ownerRef
+- A second reconcile of unchanged state writing nothing (no self-sustaining
+  reconcile loop from `Owns()` feeding our own writes back to us)
+- Recreating a ConfigMap that was deleted out from under the controller
+- Converging a drifted ConfigMap back to spec, including removing keys no
+  longer present
+- Pruning a ConfigMap from a namespace dropped from `targetNamespaces`
+- Refusing to adopt or overwrite a ConfigMap that already exists but wasn't
+  created by this controller
+- Status conditions and `observedGeneration` tracking
 
-```sh
-make uninstall
-```
+Cascade deletion of ConfigMaps when the owning `ConfigSync` itself is deleted
+relies on Kubernetes' garbage collector reading the ownerRef — envtest doesn't
+run a controller-manager, so there's no GC to exercise in that test suite.
+That path was checked by hand against a real `kind` cluster instead of by an
+automated test.
 
-**UnDeploy the controller from the cluster:**
+## Tech stack
 
-```sh
-make undeploy
-```
+Go, kubebuilder (scaffolding + CRD/RBAC generation via markers), client-go,
+controller-runtime. CI (GitHub Actions) runs lint, the envtest suite, and a
+`kind`-based e2e job on every push.
 
-## Project Distribution
+## Known limitations / non-goals
 
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/configsync-operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/configsync-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
-
-## License
-
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+- **Cluster-scoped only.** There's no per-namespace RBAC story here — anyone
+  who can create a `ConfigSync` can write a ConfigMap into any namespace it
+  lists.
+- **No Secrets support.** Only ConfigMaps; syncing Secrets would need separate
+  RBAC and probably shouldn't share this exact controller.
+- **No webhooks.** Validation is CEL/kubebuilder markers on the CRD (name
+  length, minimum items), not an admission webhook. There's no defaulting.
+- **Conflict handling is a name conflict, not a merge.** If a ConfigMap with
+  the same name already exists in a target namespace and isn't owned by this
+  controller, that namespace is skipped and reported via the `Ready`
+  condition — it is never adopted or overwritten.
+- **Not load-tested.** This was built and exercised against a single-node
+  `kind` cluster with a handful of namespaces, not a production-scale cluster.
