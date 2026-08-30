@@ -16,8 +16,14 @@ Dockerfile.cross
 # Go workspace file
 go.work
 
+# Dependencies are pulled from the module cache, not vendored
+vendor/
+
 # Kubernetes Generated files - skip generated files, except for vendored files
 !vendor/**/zz_generated.*
+
+# Coverage profile written by `make test`
+cover.out
 
 # editor and IDE paraphernalia
 .idea

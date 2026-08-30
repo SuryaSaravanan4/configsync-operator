@@ -117,8 +117,11 @@ automated test.
 ## Tech stack
 
 Go, kubebuilder (scaffolding + CRD/RBAC generation via markers), client-go,
-controller-runtime. CI (GitHub Actions) runs lint, the envtest suite, and a
-`kind`-based e2e job on every push.
+controller-runtime. CI (GitHub Actions) runs three jobs on every push: golangci-lint,
+the envtest suite above, and a `kind`-based e2e job. The e2e job is the
+kubebuilder scaffold: it deploys the manager as a Pod and checks that it comes
+up and serves its metrics endpoint. It does **not** exercise `ConfigSync`
+reconciliation — that coverage lives in the envtest suite.
 
 ## Known limitations / non-goals
 
@@ -135,3 +138,9 @@ controller-runtime. CI (GitHub Actions) runs lint, the envtest suite, and a
   condition — it is never adopted or overwritten.
 - **Not load-tested.** This was built and exercised against a single-node
   `kind` cluster with a handful of namespaces, not a production-scale cluster.
+- **Learning project, never deployed for real.** The point of this repo was to
+  understand Go and the controller-runtime reconciliation model by writing a
+  controller end to end rather than reading about one. It has only ever run
+  against a local `kind` cluster — usually via `make run` from a laptop rather
+  than as a deployed Pod — and has never been installed in a shared, staging,
+  or production cluster. Treat it as a study project, not a tool to adopt.
