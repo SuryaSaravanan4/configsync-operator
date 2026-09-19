@@ -10,7 +10,7 @@ observability, not a measurement.
 - One reconciler (`internal/controller/configsync_controller.go`): create-or-update
   per target namespace, label-based pruning, `Ready` condition, `observedGeneration`.
 - CRD validation via kubebuilder markers and one CEL rule (name <= 63 chars).
-- envtest suite that calls `Reconcile` directly (20 specs).
+- envtest suite (24 specs): most call `Reconcile` directly; four run a real manager to prove the watch wiring.
 - CI: lint, envtest (`make test`), kubebuilder-scaffold e2e (manager boots, serves `/metrics`).
 - Emits Events via an `events.k8s.io` recorder. No webhooks, no Secrets handling.
 
@@ -26,10 +26,10 @@ client injecting an Update error in one namespace), then fixed by pruning agains
 `spec.targetNamespaces`. Envtest only; not exercised on a real cluster.
 - Effort: S. Interview value: high (reconciliation correctness, operational safety).
 
-### B. Watch wiring is untested
+### B. Watch wiring is untested (fixed)
 Every spec calls `Reconcile` by hand. Nothing checks that `Owns(&ConfigMap{})`
 actually turns a hand-deleted ConfigMap into a reconcile, which is the headline
-behaviour in the README. Fix: run the manager inside envtest and use `Eventually`.
+behaviour in the README. **Fixed:** `configsync_manager_test.go` runs a real manager in envtest (only for that spec group, so it cannot race the direct-`Reconcile` specs) and uses `Eventually`. Mutation-checked: with `Owns()` removed the hand-delete spec fails on timeout. Envtest only.
 - Effort: S-M. Interview value: high (reconciliation correctness).
 
 ### C. Missing target namespace is untested

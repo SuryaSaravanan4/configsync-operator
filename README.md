@@ -107,6 +107,9 @@ no controller-manager) and covers:
 - Refusing to adopt or overwrite a ConfigMap that already exists but wasn't
   created by this controller
 - Status conditions and `observedGeneration` tracking
+- Watch wiring: with a real manager running in envtest, creating a ConfigSync,
+  hand-deleting a ConfigMap, hand-editing one, and changing the spec each
+  converge without any manual `Reconcile` call
 - Kubernetes Events on create, update, prune, conflict and failure, and none on a
   no-op reconcile (asserted with a fake recorder)
 
