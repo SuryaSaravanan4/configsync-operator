@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -77,6 +78,10 @@ var _ = Describe("Manager", Ordered, func() {
 	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
 	// and deleting the namespace.
 	AfterAll(func() {
+		By("cleaning up the ConfigSync test resources")
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "configsync", "e2e-sample", "--ignore-not-found"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", "e2e-team-a", "e2e-team-b", "--ignore-not-found"))
+
 		By("cleaning up the curl pod for metrics")
 		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
 		_, _ = utils.Run(cmd)
@@ -270,15 +275,129 @@ var _ = Describe("Manager", Ordered, func() {
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+	})
+
+	// These specs exercise the reconciler against a real cluster, with the
+	// manager running as a Pod under its own ServiceAccount and the generated
+	// ClusterRole. That is the one thing the envtest suite cannot cover: envtest
+	// runs as admin, has no garbage collector, and never checks RBAC. The specs
+	// share state and depend on running in order.
+	Context("ConfigSync reconciliation", func() {
+		const (
+			configSyncName = "e2e-sample"
+			namespaceA     = "e2e-team-a"
+			namespaceB     = "e2e-team-b"
+			configSyncYAML = `apiVersion: platform.saravanan.dev/v1alpha1
+kind: ConfigSync
+metadata:
+  name: e2e-sample
+spec:
+  targetNamespaces:
+    - e2e-team-a
+    - e2e-team-b
+  data:
+    LOG_LEVEL: info
+`
+		)
+
+		kubectl := func(args ...string) (string, error) {
+			out, err := utils.Run(exec.Command("kubectl", args...))
+			return strings.TrimSpace(out), err
+		}
+
+		// configMapField reads one jsonpath field of the managed ConfigMap.
+		configMapField := func(ns, jsonpath string) (string, error) {
+			return kubectl("get", "configmap", configSyncName, "-n", ns, "-o", "jsonpath="+jsonpath)
+		}
+
+		It("materialises a ConfigMap in every target namespace and reports Ready", func() {
+			By("creating the target namespaces")
+			for _, ns := range []string{namespaceA, namespaceB} {
+				_, err := kubectl("create", "ns", ns)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			By("applying a ConfigSync")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(configSyncYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the controller to create the ConfigMaps")
+			for _, ns := range []string{namespaceA, namespaceB} {
+				Eventually(func(g Gomega) {
+					value, err := configMapField(ns, "{.data.LOG_LEVEL}")
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(value).To(Equal("info"))
+				}).Should(Succeed(), "ConfigMap missing in "+ns)
+			}
+
+			By("checking the ConfigMaps are owned by the ConfigSync")
+			ownerUID, err := kubectl("get", "configsync", configSyncName, "-o", "jsonpath={.metadata.uid}")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ownerUID).NotTo(BeEmpty())
+			for _, ns := range []string{namespaceA, namespaceB} {
+				refUID, err := configMapField(ns, "{.metadata.ownerReferences[0].uid}")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(refUID).To(Equal(ownerUID))
+			}
+
+			By("waiting for Ready=True")
+			Eventually(func(g Gomega) {
+				status, err := kubectl("get", "configsync", configSyncName,
+					"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"))
+			}).Should(Succeed())
+		})
+
+		It("recreates a ConfigMap deleted by hand", func() {
+			originalUID, err := configMapField(namespaceA, "{.metadata.uid}")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(originalUID).NotTo(BeEmpty())
+
+			_, err = kubectl("delete", "configmap", configSyncName, "-n", namespaceA)
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				uid, err := configMapField(namespaceA, "{.metadata.uid}")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(uid).NotTo(BeEmpty())
+				g.Expect(uid).NotTo(Equal(originalUID), "still the deleted object")
+			}).Should(Succeed())
+		})
+
+		It("records Events, which needs the generated RBAC to allow events.k8s.io", func() {
+			// Events about a cluster-scoped object land in the "default"
+			// namespace, so list across all namespaces rather than assume one.
+			Eventually(func(g Gomega) {
+				out, err := kubectl("get", "events.events.k8s.io", "-A", "-o",
+					`go-template={{range .items}}{{.regarding.name}} {{.type}} {{.reason}}{{"\n"}}{{end}}`)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(ContainSubstring(configSyncName + " Normal Created"))
+			}).Should(Succeed())
+
+			By("checking the manager logged no RBAC rejections")
+			logs, err := kubectl("logs", controllerPodName, "-n", namespace)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(logs).NotTo(ContainSubstring("forbidden"))
+		})
+
+		It("garbage-collects the ConfigMaps when the ConfigSync is deleted", func() {
+			_, err := kubectl("delete", "configsync", configSyncName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Nothing in the controller deletes these: the API server's garbage
+			// collector does, by following the ownerReference.
+			for _, ns := range []string{namespaceA, namespaceB} {
+				Eventually(func(g Gomega) {
+					out, err := kubectl("get", "configmap", "-n", ns,
+						"-l", "platform.saravanan.dev/configsync="+configSyncName, "-o", "name")
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(out).To(BeEmpty(), "ConfigMap survived deletion of its owner in "+ns)
+				}).Should(Succeed())
+			}
+		})
 	})
 })
 
