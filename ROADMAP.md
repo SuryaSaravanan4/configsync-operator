@@ -47,6 +47,18 @@ about 18 ms at N=100 after (see `docs/measurements.md`). Costs a cluster-wide re
 of namespaces. Envtest only; the RBAC rule is exercised by the kind e2e in CI.
 - Effort: S. Interview value: high (operational safety, measured not assumed).
 
+### E. A ConfigSync waiting on a missing namespace only retried on backoff (fixed)
+After D, a missing namespace fails fast but is still retried only on exponential
+backoff, which grows to minutes. **Fixed** with a Namespace-creation watch that
+enqueues the ConfigSyncs targeting it. Envtest spec fails before (timed out after
+2 s) and passes after; not timed as a latency. The linear scan in the map function
+is unmeasured at scale.
+- Effort: S. Interview value: medium-high (reconciliation correctness).
+
+**Deliberately not done:** `MaxConcurrentReconciles` (no spec yet shows one slow
+ConfigSync blocking others, so it would be a guess) and Secrets (needs a design
+decision on API shape and RBAC first).
+
 ## Items from the original list
 
 | # | Gap | Effort | Interview value | Notes |

@@ -103,14 +103,28 @@ Costs of the change that these numbers do not capture:
 - A namespace created just after a ConfigSync may not be in the cache yet. It is
   then reported as missing and picked up by the backoff retry, which starts at a
   few milliseconds. I have not measured how often that happens.
-- There is still no Namespace watch, so a ConfigSync waiting on a missing
-  namespace is only retried on backoff, not the moment the namespace appears.
-  That was already true before this change.
+- The Namespace watch described in the next section closes this gap: a
+  namespace created after the ConfigSync now triggers a reconcile directly
+  instead of waiting for backoff.
+
+## Namespace watch
+
+The manager also watches Namespace creation and enqueues every ConfigSync that
+lists the new namespace. Before this, a ConfigSync waiting on a missing
+namespace was retried only on exponential backoff. The spec for it
+(`configsync_manager_test.go`) lets the backoff grow for 6 seconds, when the
+next retry is several seconds away, then creates the namespace and requires the
+ConfigMap within 2 seconds. Before the watch existed that spec timed out after
+2.001 s; with it, it passes. That is a pass/fail check of behaviour, not a
+latency measurement, and I did not time how quickly the ConfigMap appears.
+
+Not measured: the map function scans the cached ConfigSync list linearly for
+each namespace event, and every existing namespace produces one event when the
+informer first syncs, so a manager start costs roughly namespaces x ConfigSyncs
+list scans. That is cheap for small clusters and unmeasured for large ones.
 
 ## Remaining options
 
 2. Raise `MaxConcurrentReconciles` so one slow ConfigSync does not block the
-   others. Not implemented.
-3. Watch Namespaces and enqueue the ConfigSyncs that target a new one, so a
-   missing namespace is picked up immediately instead of on backoff. Not
-   implemented.
+   others. Not implemented: there is no spec yet showing that the blocking
+   actually happens, so it would be a guess.

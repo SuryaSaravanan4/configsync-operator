@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,9 +32,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	platformv1alpha1 "github.com/SuryaSaravanan4/configsync-operator/api/v1alpha1"
 )
@@ -368,6 +374,41 @@ func (r *ConfigSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// ConfigSync. This is what turns a hand-deleted ConfigMap into a
 		// reconcile of its parent.
 		Owns(&corev1.ConfigMap{}).
+		// A namespace appearing is the one event that can unblock a ConfigSync
+		// whose target was missing, and nothing we own changes when it happens.
+		// Without this watch such a ConfigSync is only retried on exponential
+		// backoff, which grows to minutes. Only creation matters: the reconcile
+		// itself handles a namespace that is already there.
+		Watches(&corev1.Namespace{},
+			handler.EnqueueRequestsFromMapFunc(r.configSyncsTargeting),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc:  func(event.CreateEvent) bool { return true },
+				UpdateFunc:  func(event.UpdateEvent) bool { return false },
+				DeleteFunc:  func(event.DeleteEvent) bool { return false },
+				GenericFunc: func(event.GenericEvent) bool { return false },
+			})).
 		Named("configsync").
 		Complete(r)
+}
+
+// configSyncsTargeting maps a Namespace to a reconcile request for every
+// ConfigSync that lists it in spec.targetNamespaces. It scans the cached list
+// linearly, which costs O(ConfigSyncs x targets) per namespace event and has not
+// been measured at scale.
+func (r *ConfigSyncReconciler) configSyncsTargeting(ctx context.Context, obj client.Object) []reconcile.Request {
+	var configSyncs platformv1alpha1.ConfigSyncList
+	if err := r.List(ctx, &configSyncs); err != nil {
+		logf.FromContext(ctx).Error(err, "Failed to list ConfigSyncs for Namespace event", "namespace", obj.GetName())
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for i := range configSyncs.Items {
+		if slices.Contains(configSyncs.Items[i].Spec.TargetNamespaces, obj.GetName()) {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: client.ObjectKeyFromObject(&configSyncs.Items[i]),
+			})
+		}
+	}
+	return requests
 }

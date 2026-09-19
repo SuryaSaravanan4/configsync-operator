@@ -140,9 +140,10 @@ runner; it is a real API server and garbage collector, not a production cluster.
   stop the same person targeting any other sensitive namespace.
 - **Reads every namespace.** To skip a create into a missing namespace (the API
   server sleeps 50 ms before rejecting it; see
-  [docs/measurements.md](docs/measurements.md)), the manager has cluster-wide
-  `get`, `list` and `watch` on `namespaces` and runs a Namespace informer. That
-  is a wider permission than ConfigMaps alone.
+  [docs/measurements.md](docs/measurements.md)) and to react when a missing
+  namespace is created, the manager has cluster-wide `get`, `list` and `watch`
+  on `namespaces` and runs a Namespace informer. That is a wider permission than
+  ConfigMaps alone.
 - **No Secrets support.** Only ConfigMaps; syncing Secrets would need separate
   RBAC and probably shouldn't share this exact controller.
 - **No webhooks.** Validation is CEL and kubebuilder markers on the CRD, not an

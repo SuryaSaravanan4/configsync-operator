@@ -168,4 +168,41 @@ var _ = Describe("ConfigSync controller wiring", Ordered, func() {
 			g.Expect(configMap.Data).To(Equal(map[string]string{testDataKey: "v2"}))
 		}, eventuallyTimeout, pollInterval).Should(Succeed())
 	})
+
+	It("syncs a namespace created after the ConfigSync without waiting for backoff", func() {
+		// A ConfigSync that targets a missing namespace fails and is retried with
+		// exponential backoff (5ms, 10ms, 20ms, ...). Early retries are fast, so
+		// the namespace must appear well after the backoff has grown for this to
+		// tell a Namespace watch apart from a lucky retry: the retries land at
+		// roughly 0, 5s and 10s, so creating the namespace at 6s leaves the next
+		// retry several seconds away.
+		name := "wiring-late-ns"
+		namespace := name + "-ns"
+		Expect(k8sClient.Create(ctx, &platformv1alpha1.ConfigSync{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: platformv1alpha1.ConfigSyncSpec{
+				TargetNamespaces: []string{namespace},
+				Data:             map[string]string{testDataKey: testDataValue},
+			},
+		})).To(Succeed())
+
+		By("waiting for the controller to report the missing namespace")
+		Eventually(func(g Gomega) {
+			var configSync platformv1alpha1.ConfigSync
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, &configSync)).To(Succeed())
+			condition := meta.FindStatusCondition(configSync.Status.Conditions, conditionTypeReady)
+			g.Expect(condition).NotTo(BeNil())
+			g.Expect(condition.Reason).To(Equal(reasonSyncFailed))
+		}, eventuallyTimeout, pollInterval).Should(Succeed())
+
+		By("letting the retry backoff grow")
+		time.Sleep(6 * time.Second)
+
+		By("creating the namespace, and expecting the ConfigMap within 2s")
+		Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}})).To(Succeed())
+		Eventually(func(g Gomega) {
+			var configMap corev1.ConfigMap
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &configMap)).To(Succeed())
+		}, 2*time.Second, pollInterval).Should(Succeed())
+	})
 })
