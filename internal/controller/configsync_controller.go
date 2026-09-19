@@ -130,7 +130,11 @@ func (r *ConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// away, but they do nothing about spec drift: a namespace dropped from
 	// targetNamespaces still has a live owner, so the garbage collector will
 	// never touch it. Pruning by label is the only thing that removes it.
-	failures = append(failures, r.pruneOrphans(ctx, &configSync, synced)...)
+	//
+	// The keep-list is the spec, not "synced". A namespace whose sync failed this
+	// pass is still targeted, and pruning it would turn a transient API error
+	// into deleting a ConfigMap the user wants.
+	failures = append(failures, r.pruneOrphans(ctx, &configSync, configSync.Spec.TargetNamespaces)...)
 
 	if err := r.updateStatus(ctx, &configSync, synced, conflicts, failures); err != nil {
 		return ctrl.Result{}, err
@@ -208,8 +212,8 @@ func (r *ConfigSyncReconciler) syncNamespace(
 	return err
 }
 
-// pruneOrphans deletes ConfigMaps this ConfigSync owns that sit in namespaces it
-// no longer targets. It returns a message per failed deletion rather than
+// pruneOrphans deletes ConfigMaps this ConfigSync owns that sit in namespaces
+// outside keep, which must be every namespace the spec targets. It returns a message per failed deletion rather than
 // stopping, so one undeletable ConfigMap cannot block the rest.
 func (r *ConfigSyncReconciler) pruneOrphans(
 	ctx context.Context,

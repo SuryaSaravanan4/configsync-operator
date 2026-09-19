@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -29,6 +30,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	platformv1alpha1 "github.com/SuryaSaravanan4/configsync-operator/api/v1alpha1"
@@ -298,6 +301,74 @@ var _ = Describe("ConfigSync Controller", func() {
 			survivor := getConfigMap(elsewhere, name)
 			Expect(survivor.Data).To(Equal(map[string]string{preciousKey: "do-not-delete"}))
 			Expect(survivor.UID).To(Equal(forged.UID))
+		})
+	})
+
+	Context("when a write to a still-targeted namespace fails", func() {
+		It("does not prune the ConfigMap it already owns there", func() {
+			// A namespace whose sync failed is absent from the "synced" list, but it
+			// is still in spec.targetNamespaces. Pruning must key off the spec, not
+			// off what happened to succeed this pass, or a transient API error
+			// deletes a ConfigMap the user wants.
+			name := newName("prune-on-failure")
+			namespaces := createNamespaces(newName("ns-ok"), newName("ns-flaky"))
+			ok, flaky := namespaces[0], namespaces[1]
+			createConfigSync(name, map[string]string{testDataKey: testDataValue}, namespaces...)
+			reconcileOnce(name)
+
+			By("changing the spec so both ConfigMaps need an update")
+			configSync := getConfigSync(name)
+			configSync.Spec.Data = map[string]string{testDataKey: "v2"}
+			Expect(k8sClient.Update(ctx, configSync)).To(Succeed())
+
+			By("failing ConfigMap updates in one namespace only")
+			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			flakyReconciler := &ConfigSyncReconciler{
+				Scheme: k8sClient.Scheme(),
+				Client: interceptor.NewClient(watchClient, interceptor.Funcs{
+					Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+						if _, isConfigMap := obj.(*corev1.ConfigMap); isConfigMap && obj.GetNamespace() == flaky {
+							return apierrors.NewServiceUnavailable("injected failure")
+						}
+						return c.Update(ctx, obj, opts...)
+					},
+				}),
+			}
+			_, err = flakyReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+			Expect(err).To(HaveOccurred())
+
+			By("still holding the old ConfigMap in the failing namespace")
+			Expect(getConfigMap(flaky, name).Data).To(Equal(map[string]string{testDataKey: testDataValue}))
+
+			By("having updated the healthy namespace")
+			Expect(getConfigMap(ok, name).Data).To(Equal(map[string]string{testDataKey: "v2"}))
+
+			By("converging once the failure clears")
+			reconcileOnce(name)
+			Expect(getConfigMap(flaky, name).Data).To(Equal(map[string]string{testDataKey: "v2"}))
+		})
+	})
+
+	Context("when a target namespace does not exist", func() {
+		It("reports Ready=False/SyncFailed, returns an error, and still syncs the others", func() {
+			name := newName("missing-ns")
+			namespaces := createNamespaces(newName("ns-real"))
+			missing := newName("ns-missing")
+			createConfigSync(name, map[string]string{testDataKey: testDataValue}, missing, namespaces[0])
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+			Expect(err).To(HaveOccurred())
+
+			Expect(getConfigMap(namespaces[0], name).Data).To(Equal(map[string]string{testDataKey: testDataValue}))
+
+			status := getConfigSync(name).Status
+			Expect(status.SyncedNamespaces).To(ConsistOf(namespaces[0]))
+			condition := meta.FindStatusCondition(status.Conditions, conditionTypeReady)
+			Expect(condition).NotTo(BeNil())
+			Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(condition.Reason).To(Equal(reasonSyncFailed))
+			Expect(condition.Message).To(ContainSubstring(missing))
 		})
 	})
 
