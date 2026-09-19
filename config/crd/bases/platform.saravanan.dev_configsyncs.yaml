@@ -61,9 +61,15 @@ spec:
                 description: |-
                   targetNamespaces is the list of namespaces the managed ConfigMap is
                   materialized into. Removing a namespace from this list causes the
-                  ConfigMap in that namespace to be pruned on the next reconcile.
+                  ConfigMap in that namespace to be pruned on the next reconcile. At most 100
+                  namespaces are allowed; the cap bounds the fan-out of one ConfigSync and
+                  keeps the CEL validation rule within the API server's cost budget.
                 items:
+                  maxLength: 63
+                  minLength: 1
+                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                   type: string
+                maxItems: 100
                 minItems: 1
                 type: array
                 x-kubernetes-list-type: atomic
@@ -71,6 +77,11 @@ spec:
             - data
             - targetNamespaces
             type: object
+            x-kubernetes-validations:
+            - message: targetNamespaces must not include kube-system, kube-public,
+                or kube-node-lease
+              rule: '!self.targetNamespaces.exists(ns, ns in [''kube-system'', ''kube-public'',
+                ''kube-node-lease''])'
           status:
             description: status defines the observed state of ConfigSync
             properties:

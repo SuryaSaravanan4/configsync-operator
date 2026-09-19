@@ -135,11 +135,15 @@ runner; it is a real API server and garbage collector, not a production cluster.
 
 - **Cluster-scoped only.** There's no per-namespace RBAC story here — anyone
   who can create a `ConfigSync` can write a ConfigMap into any namespace it
-  lists.
+  lists, except `kube-system`, `kube-public` and `kube-node-lease`, which the
+  CRD rejects. That deny-list is a schema rule, not access control: it does not
+  stop the same person targeting any other sensitive namespace.
 - **No Secrets support.** Only ConfigMaps; syncing Secrets would need separate
   RBAC and probably shouldn't share this exact controller.
-- **No webhooks.** Validation is CEL/kubebuilder markers on the CRD (name
-  length, minimum items), not an admission webhook. There's no defaulting.
+- **No webhooks.** Validation is CEL and kubebuilder markers on the CRD, not an
+  admission webhook: at least 1 and at most 100 target namespaces (the cap is an
+  arbitrary guardrail, not a measured limit), each a valid DNS label, no
+  control-plane namespaces, name length, non-empty data. There's no defaulting.
 - **Conflict handling is a name conflict, not a merge.** If a ConfigMap with
   the same name already exists in a target namespace and isn't owned by this
   controller, that namespace is skipped and reported via the `Ready`

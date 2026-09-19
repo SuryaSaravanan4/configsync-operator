@@ -616,6 +616,78 @@ var _ = Describe("ConfigSync Controller", func() {
 			})).To(Succeed())
 		})
 
+		It("rejects system namespaces in targetNamespaces", func() {
+			// Anyone who can create a ConfigSync can write into every namespace it
+			// lists, so the control-plane namespaces are refused at admission.
+			for _, system := range []string{"kube-system", "kube-public", "kube-node-lease"} {
+				By("rejecting " + system + " when listed alongside a legal namespace")
+				err := k8sClient.Create(ctx, &platformv1alpha1.ConfigSync{
+					ObjectMeta: metav1.ObjectMeta{Name: newName("deny-" + system)},
+					Spec: platformv1alpha1.ConfigSyncSpec{
+						TargetNamespaces: []string{defaultNamespace, system},
+						Data:             map[string]string{testDataKey: testDataValue},
+					},
+				})
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("must not include kube-system"))
+			}
+
+			By("still accepting a namespace that merely starts with kube-")
+			Expect(k8sClient.Create(ctx, &platformv1alpha1.ConfigSync{
+				ObjectMeta: metav1.ObjectMeta{Name: newName("kube-prefix-ok")},
+				Spec: platformv1alpha1.ConfigSyncSpec{
+					TargetNamespaces: []string{"kube-mine"},
+					Data:             map[string]string{testDataKey: testDataValue},
+				},
+			})).To(Succeed())
+		})
+
+		It("caps targetNamespaces at 100 entries", func() {
+			namespaces := func(n int) []string {
+				out := make([]string, n)
+				for i := range out {
+					out[i] = fmt.Sprintf("cap-ns-%d", i)
+				}
+				return out
+			}
+			newConfigSync := func(name string, n int) *platformv1alpha1.ConfigSync {
+				return &platformv1alpha1.ConfigSync{
+					ObjectMeta: metav1.ObjectMeta{Name: name},
+					Spec: platformv1alpha1.ConfigSyncSpec{
+						TargetNamespaces: namespaces(n),
+						Data:             map[string]string{testDataKey: testDataValue},
+					},
+				}
+			}
+
+			err := k8sClient.Create(ctx, newConfigSync(newName("over-cap"), 101))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("targetNamespaces"))
+
+			// This object targets namespaces that do not exist. Remove it so a manager
+			// started by a later spec group does not spend its time failing 100
+			// syncs on it.
+			atCap := newConfigSync(newName("at-cap"), 100)
+			Expect(k8sClient.Create(ctx, atCap)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, atCap)).To(Succeed())
+		})
+
+		It("rejects namespace names that are not valid DNS labels", func() {
+			// A malformed name would otherwise pass admission and fail on every
+			// reconcile with an error from the ConfigMap create.
+			for _, bad := range []string{"Team-A", "team_a", "-leading", "trailing-", "", strings.Repeat("a", 64)} {
+				err := k8sClient.Create(ctx, &platformv1alpha1.ConfigSync{
+					ObjectMeta: metav1.ObjectMeta{Name: newName("badns")},
+					Spec: platformv1alpha1.ConfigSyncSpec{
+						TargetNamespaces: []string{bad},
+						Data:             map[string]string{testDataKey: testDataValue},
+					},
+				})
+				Expect(err).To(HaveOccurred(), "accepted namespace %q", bad)
+				Expect(err.Error()).To(ContainSubstring("targetNamespaces"), "namespace %q", bad)
+			}
+		})
+
 		It("rejects an empty targetNamespaces and an empty data map", func() {
 			By("rejecting empty targetNamespaces")
 			err := k8sClient.Create(ctx, &platformv1alpha1.ConfigSync{

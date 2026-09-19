@@ -22,11 +22,18 @@ import (
 )
 
 // ConfigSyncSpec defines the desired state of ConfigSync
+// +kubebuilder:validation:XValidation:rule="!self.targetNamespaces.exists(ns, ns in ['kube-system', 'kube-public', 'kube-node-lease'])",message="targetNamespaces must not include kube-system, kube-public, or kube-node-lease"
 type ConfigSyncSpec struct {
 	// targetNamespaces is the list of namespaces the managed ConfigMap is
 	// materialized into. Removing a namespace from this list causes the
-	// ConfigMap in that namespace to be pruned on the next reconcile.
+	// ConfigMap in that namespace to be pruned on the next reconcile. At most 100
+	// namespaces are allowed; the cap bounds the fan-out of one ConfigSync and
+	// keeps the CEL validation rule within the API server's cost budget.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=100
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +listType=atomic
 	// +required
 	TargetNamespaces []string `json:"targetNamespaces"`
