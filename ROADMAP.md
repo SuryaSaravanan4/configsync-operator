@@ -11,7 +11,7 @@ observability, not a measurement.
   per target namespace, label-based pruning, `Ready` condition, `observedGeneration`.
 - CRD validation via kubebuilder markers and one CEL rule (name <= 63 chars).
 - envtest suite (24 specs): most call `Reconcile` directly; four run a real manager to prove the watch wiring.
-- CI: lint, envtest (`make test`), kubebuilder-scaffold e2e (manager boots, serves `/metrics`).
+- CI: lint, envtest (`make test`), and a kind e2e that deploys the manager and exercises reconciliation, RBAC-gated Events and cascade GC.
 - Emits Events via an `events.k8s.io` recorder. No webhooks, no Secrets handling.
 
 ## Gaps found during code review (not in the original list)
@@ -43,9 +43,9 @@ was already correct and is now pinned.
 
 | # | Gap | Effort | Interview value | Notes |
 |---|-----|--------|-----------------|-------|
-| 1 | ~~No Kubernetes Events~~ | S | High (observability) | **Done.** `events.EventRecorder` (events.k8s.io) on the reconciler; Events on create, update, prune, conflict, failure; silent on no-op reconciles. `events.k8s.io` create/patch RBAC added. Verified with `FakeRecorder` specs and, in a throwaway envtest run with a real manager, by reading back the real Event objects. **Not verified:** the RBAC rule under a real ServiceAccount (envtest runs as admin), and behaviour on a real cluster. |
-| 2 | Cascade delete is untested | M | High (correctness) | envtest has no GC. Needs a real cluster (kind) test: create CR, delete CR, `Eventually` ConfigMaps gone. Behaviour is real-cluster-only; envtest cannot prove it. |
-| 3 | e2e does not exercise reconciliation | M | High (operational safety) | Same test file as #2: deploy manager as Pod, apply a ConfigSync, assert ConfigMaps and `Ready=True`. Closes #2 and this gap together. |
+| 1 | ~~No Kubernetes Events~~ | S | High (observability) | **Done.** `events.EventRecorder` (events.k8s.io) on the reconciler; Events on create, update, prune, conflict, failure; silent on no-op reconciles. `events.k8s.io` create/patch RBAC added. Verified with `FakeRecorder` specs and, in a throwaway envtest run with a real manager, by reading back the real Event objects. The RBAC rule is now verified in the kind e2e (a `Created` Event is recorded under the real ServiceAccount, no `forbidden` in the manager log). Not verified beyond a single-node kind cluster on a CI runner. |
+| 2 | ~~Cascade delete is untested~~ | M | High (correctness) | **Done** in the kind e2e: delete the ConfigSync, then `Eventually` its ConfigMaps are gone in both namespaces (the API server GC does it, not the controller). Ran in CI: 6 of 6 e2e specs passed. Single-node kind (`kindest/node:v1.37.0`) only. |
+| 3 | ~~e2e does not exercise reconciliation~~ | M | High (operational safety) | **Done** in `test/e2e/e2e_test.go`: applies a ConfigSync to the deployed manager, checks owned ConfigMaps, `Ready=True`, hand-delete recovery, Events under the real ServiceAccount, and GC. Ran in CI on branch `e2e-reconcile`. |
 | 4 | No admission webhook | L | Medium | Needs webhook server wiring, cert-manager or self-signed certs, kustomize patches, and a webhook e2e. CEL already covers the current rules; a webhook only adds value for checks CEL cannot express (e.g. namespace existence, deny-list such as `kube-system`). A CEL rule or ValidatingAdmissionPolicy would cover a deny-list at S effort. |
 | 5 | No Secrets support | M | Medium | Widens RBAC to Secrets cluster-wide, which is a security regression the README currently avoids. Needs a design decision (separate CRD vs. `kind` field) first. |
 | 6 | No throughput/latency numbers | M | Low-medium | Only meaningful if measured, and a laptop kind cluster gives numbers that say little about production. If done, report them as "single-node kind on <hardware>, N namespaces" and nothing broader. |

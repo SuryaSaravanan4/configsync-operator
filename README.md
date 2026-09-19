@@ -114,19 +114,22 @@ no controller-manager) and covers:
   no-op reconcile (asserted with a fake recorder)
 
 Cascade deletion of ConfigMaps when the owning `ConfigSync` itself is deleted
-relies on Kubernetes' garbage collector reading the ownerRef — envtest doesn't
-run a controller-manager, so there's no GC to exercise in that test suite.
-That path was checked by hand against a real `kind` cluster instead of by an
-automated test.
+relies on Kubernetes' garbage collector reading the ownerRef. envtest doesn't
+run a controller-manager, so that path is covered by the `kind` e2e job instead
+(see below), not by the envtest suite.
 
 ## Tech stack
 
 Go, kubebuilder (scaffolding + CRD/RBAC generation via markers), client-go,
 controller-runtime. CI (GitHub Actions) runs three jobs on every push: golangci-lint,
-the envtest suite above, and a `kind`-based e2e job. The e2e job is the
-kubebuilder scaffold: it deploys the manager as a Pod and checks that it comes
-up and serves its metrics endpoint. It does **not** exercise `ConfigSync`
-reconciliation — that coverage lives in the envtest suite.
+the envtest suite above, and a `kind`-based e2e job. The e2e job deploys the
+manager as a Pod under its generated ServiceAccount and ClusterRole, checks that
+it serves its metrics endpoint, and then applies a `ConfigSync` to check that
+ConfigMaps are created and owned, that `Ready` becomes `True`, that a
+hand-deleted ConfigMap is recreated, that an Event is recorded (which exercises
+the `events.k8s.io` RBAC rule), and that deleting the `ConfigSync`
+garbage-collects its ConfigMaps. That is a single-node `kind` cluster on a CI
+runner; it is a real API server and garbage collector, not a production cluster.
 
 ## Known limitations / non-goals
 
