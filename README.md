@@ -148,7 +148,9 @@ runner; it is a real API server and garbage collector, not a production cluster.
   the same name already exists in a target namespace and isn't owned by this
   controller, that namespace is skipped and reported via the `Ready`
   condition — it is never adopted or overwritten.
-- **Not load-tested.** This was built and exercised against a single-node
+- **Not load-tested.** Per-reconcile latency has been measured in envtest on one
+  laptop (see [docs/measurements.md](docs/measurements.md)); there is no
+  multi-object throughput figure. This was built and exercised against a single-node
   `kind` cluster with a handful of namespaces, not a production-scale cluster.
 - **Learning project, never deployed for real.** The point of this repo was to
   understand Go and the controller-runtime reconciliation model by writing a
