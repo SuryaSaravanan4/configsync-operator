@@ -94,6 +94,7 @@ type ConfigSyncReconciler struct {
 // +kubebuilder:rbac:groups=platform.saravanan.dev,resources=configsyncs/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 
 // Reconcile materializes the ConfigSync's data as a ConfigMap in every target
 // namespace. It is level-triggered: it does not know why it was invoked, only
@@ -196,6 +197,16 @@ func (r *ConfigSyncReconciler) syncNamespace(
 	configSync *platformv1alpha1.ConfigSync,
 	namespace string,
 ) (controllerutil.OperationResult, error) {
+	// Look the namespace up before writing to it. The API server sleeps 50ms
+	// before rejecting a create into a namespace it cannot find, and it does so
+	// on every attempt, so a ConfigSync with many missing namespaces would hold
+	// the worker for 50ms each. In production r.Get is served from the cache. A
+	// NotFound is returned as-is: it is reported as a failed namespace, so the
+	// reconcile is still retried with backoff until the namespace appears.
+	if err := r.Get(ctx, client.ObjectKey{Name: namespace}, &corev1.Namespace{}); err != nil {
+		return controllerutil.OperationResultNone, err
+	}
+
 	// CreateOrUpdate needs an object carrying just the key. It Gets into this
 	// object, then hands it to the mutate function either empty (create path) or
 	// populated with the live state (update path).

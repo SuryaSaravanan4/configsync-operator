@@ -39,6 +39,14 @@ A target namespace that does not exist makes `CreateOrUpdate` fail, the CR goes
 was already correct and is now pinned.
 - Effort: S. Interview value: medium.
 
+### D. A missing target namespace costs 58 ms per reconcile (fixed)
+Measured in envtest: the API server sleeps 50 ms before rejecting a create into a
+namespace it cannot find, so 100 missing namespaces held the single worker for
+about 5.8 s per attempt. **Fixed** with a cached Namespace lookup before writing:
+about 18 ms at N=100 after (see `docs/measurements.md`). Costs a cluster-wide read
+of namespaces. Envtest only; the RBAC rule is exercised by the kind e2e in CI.
+- Effort: S. Interview value: high (operational safety, measured not assumed).
+
 ## Items from the original list
 
 | # | Gap | Effort | Interview value | Notes |

@@ -379,6 +379,46 @@ var _ = Describe("ConfigSync Controller", func() {
 		})
 	})
 
+	Context("skipping the API call for namespaces that do not exist", func() {
+		It("sends no ConfigMap create to a missing namespace", func() {
+			// The API server sleeps 50ms before rejecting a create into a namespace
+			// it cannot find (docs/measurements.md), so with many missing
+			// namespaces the cost is paid on every attempt. Looking the namespace up
+			// first, from the cache in production, avoids the call entirely.
+			name := newName("precheck")
+			existing := createNamespaces(newName("ns-real"))[0]
+			missing := []string{newName("ns-gone-a"), newName("ns-gone-b")}
+			createConfigSync(name, map[string]string{testDataKey: testDataValue}, append([]string{existing}, missing...)...)
+
+			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			var createdIn []string
+			countingReconciler := &ConfigSyncReconciler{
+				Scheme:   k8sClient.Scheme(),
+				Recorder: recorder,
+				Client: interceptor.NewClient(watchClient, interceptor.Funcs{
+					Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+						if _, isConfigMap := obj.(*corev1.ConfigMap); isConfigMap {
+							createdIn = append(createdIn, obj.GetNamespace())
+						}
+						return c.Create(ctx, obj, opts...)
+					},
+				}),
+			}
+
+			_, err = countingReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+
+			By("still reporting the failure, so the reconcile is retried")
+			Expect(err).To(HaveOccurred())
+			for _, gone := range missing {
+				Expect(err.Error()).To(ContainSubstring(gone))
+			}
+
+			By("only calling create for the namespace that exists")
+			Expect(createdIn).To(Equal([]string{existing}))
+		})
+	})
+
 	Context("refusing to adopt ConfigMaps it did not create", func() {
 		It("leaves a pre-existing ConfigMap completely untouched", func() {
 			name := newName("foreign")

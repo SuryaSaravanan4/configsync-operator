@@ -138,6 +138,11 @@ runner; it is a real API server and garbage collector, not a production cluster.
   lists, except `kube-system`, `kube-public` and `kube-node-lease`, which the
   CRD rejects. That deny-list is a schema rule, not access control: it does not
   stop the same person targeting any other sensitive namespace.
+- **Reads every namespace.** To skip a create into a missing namespace (the API
+  server sleeps 50 ms before rejecting it; see
+  [docs/measurements.md](docs/measurements.md)), the manager has cluster-wide
+  `get`, `list` and `watch` on `namespaces` and runs a Namespace informer. That
+  is a wider permission than ConfigMaps alone.
 - **No Secrets support.** Only ConfigMaps; syncing Secrets would need separate
   RBAC and probably shouldn't share this exact controller.
 - **No webhooks.** Validation is CEL and kubebuilder markers on the CRD, not an

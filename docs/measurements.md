@@ -21,7 +21,7 @@ Raw output is in [measurements-raw.txt](measurements-raw.txt).
   latency for one object at a time. Nothing here has been measured outside
   envtest, and the absolute numbers will differ on other hardware and clusters.
 
-## Results (median, milliseconds)
+## Results before the pre-check (median, milliseconds)
 
 Setting: real Event recorder and the development logger, i.e. how `cmd/main.go`
 runs the controller.
@@ -55,7 +55,7 @@ of ordinary request time matches the measured 58 ms. That plugin is enabled by
 default, so a real cluster should behave the same way, but I have only measured
 it in envtest.
 
-## What it means
+## What it meant before the pre-check
 
 - One ConfigSync with N missing namespaces holds the (single) worker for about
   `58 ms x N` on every attempt, and failed attempts are retried with backoff.
@@ -68,12 +68,49 @@ it in envtest.
   at about 6 s per attempt. That cap is an arbitrary guardrail, not derived
   from these numbers.
 
-## Options, not implemented
+## After the namespace pre-check
 
-1. Check that each namespace exists from a cached `Namespace` informer before
-   trying to create, and skip missing ones. This avoids the 50 ms wait but adds
-   a cluster-wide `namespaces` get/list/watch permission.
+The first option from the earlier version of this document was then implemented: `syncNamespace` looks the namespace up (from
+the cache in production) before writing to it and skips the create when it is
+missing. The failure is still reported and the reconcile is still retried with
+backoff, so behaviour is unchanged apart from the API call not being made. Same
+harness, same conditions, same setting as the table above. Raw output:
+[measurements-raw-after-precheck.txt](measurements-raw-after-precheck.txt).
+
+| Target namespaces (N) | 1 | 10 | 50 | 100 |
+|---|---:|---:|---:|---:|
+| All exist, first reconcile (creates N ConfigMaps) | 6.8 | 31.3 | 161.2 | 341.5 |
+| All exist, steady state (nothing to change) | 4.5 | 6.1 | 8.8 | 11.4 |
+| **All missing**, first reconcile | 4.7 | 5.1 | 10.6 | 18.4 |
+| **All missing**, repeat reconcile | 5.5 | 6.3 | 9.4 | 23.4 |
+
+- **Missing namespaces:** at N=100 the median went from 5793 ms to 18.4 ms
+  (first reconcile) and from 5829 ms to 23.4 ms (repeat), about 300 times less
+  (arithmetic on the two tables). The cost no longer grows at 58 ms per
+  namespace.
+- **Steady state:** 11.0 ms before, 11.4 ms after at N=100.
+- **Creating at N=100: no conclusion.** The medians were 222, 270 and 290 ms
+  before and 342, 290 and 235 ms after, across the three logging/recorder
+  settings, which should behave the same. Run-to-run spread is as large as the
+  difference, so these numbers cannot show whether creating got slower or not.
+  A cached namespace lookup per namespace is tiny next to a 2 ms API write, but
+  I have not measured it separately.
+
+Costs of the change that these numbers do not capture:
+
+- The manager now needs cluster-wide `get`/`list`/`watch` on `namespaces`, and
+  runs a Namespace informer. That is a wider permission than before.
+- A namespace created just after a ConfigSync may not be in the cache yet. It is
+  then reported as missing and picked up by the backoff retry, which starts at a
+  few milliseconds. I have not measured how often that happens.
+- There is still no Namespace watch, so a ConfigSync waiting on a missing
+  namespace is only retried on backoff, not the moment the namespace appears.
+  That was already true before this change.
+
+## Remaining options
+
 2. Raise `MaxConcurrentReconciles` so one slow ConfigSync does not block the
-   others. This does not make the slow one faster.
-3. Leave it. The cost is bounded by the 100-namespace cap and only affects a
-   misconfigured ConfigSync.
+   others. Not implemented.
+3. Watch Namespaces and enqueue the ConfigSyncs that target a new one, so a
+   missing namespace is picked up immediately instead of on backoff. Not
+   implemented.
