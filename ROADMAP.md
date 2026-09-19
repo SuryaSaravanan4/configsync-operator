@@ -1,6 +1,6 @@
 # Roadmap
 
-Written against the code at commit `a5ecbb7`. Nothing here is implemented yet.
+Written against commit `a5ecbb7`; items marked Fixed/Done have since been implemented.
 Effort: S (< half a day), M (about a day), L (multi-day). Interview value is a
 judgement call about reconciliation correctness, operational safety, and
 observability, not a measurement.
@@ -10,9 +10,9 @@ observability, not a measurement.
 - One reconciler (`internal/controller/configsync_controller.go`): create-or-update
   per target namespace, label-based pruning, `Ready` condition, `observedGeneration`.
 - CRD validation via kubebuilder markers and one CEL rule (name <= 63 chars).
-- envtest suite that calls `Reconcile` directly (14 specs).
+- envtest suite that calls `Reconcile` directly (20 specs).
 - CI: lint, envtest (`make test`), kubebuilder-scaffold e2e (manager boots, serves `/metrics`).
-- No webhooks, no `EventRecorder`, no Events RBAC, no Secrets handling.
+- Emits Events via an `events.k8s.io` recorder. No webhooks, no Secrets handling.
 
 ## Gaps found during code review (not in the original list)
 
