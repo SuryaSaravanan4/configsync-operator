@@ -43,7 +43,7 @@ was already correct and is now pinned.
 
 | # | Gap | Effort | Interview value | Notes |
 |---|-----|--------|-----------------|-------|
-| 1 | No Kubernetes Events | S | High (observability) | Needs a `record.EventRecorder` on the reconciler, `events` create/patch RBAC marker, and calls at create/prune/conflict/failure. Testable in envtest with `record.FakeRecorder`. |
+| 1 | ~~No Kubernetes Events~~ | S | High (observability) | **Done.** `events.EventRecorder` (events.k8s.io) on the reconciler; Events on create, update, prune, conflict, failure; silent on no-op reconciles. `events.k8s.io` create/patch RBAC added. Verified with `FakeRecorder` specs and, in a throwaway envtest run with a real manager, by reading back the real Event objects. **Not verified:** the RBAC rule under a real ServiceAccount (envtest runs as admin), and behaviour on a real cluster. |
 | 2 | Cascade delete is untested | M | High (correctness) | envtest has no GC. Needs a real cluster (kind) test: create CR, delete CR, `Eventually` ConfigMaps gone. Behaviour is real-cluster-only; envtest cannot prove it. |
 | 3 | e2e does not exercise reconciliation | M | High (operational safety) | Same test file as #2: deploy manager as Pod, apply a ConfigSync, assert ConfigMaps and `Ready=True`. Closes #2 and this gap together. |
 | 4 | No admission webhook | L | Medium | Needs webhook server wiring, cert-manager or self-signed certs, kustomize patches, and a webhook e2e. CEL already covers the current rules; a webhook only adds value for checks CEL cannot express (e.g. namespace existence, deny-list such as `kube-system`). A CEL rule or ValidatingAdmissionPolicy would cover a deny-list at S effort. |

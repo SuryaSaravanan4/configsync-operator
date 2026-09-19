@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -63,6 +64,9 @@ const (
 var _ = Describe("ConfigSync Controller", func() {
 	var (
 		reconciler *ConfigSyncReconciler
+		// recorder is a fake whose Events channel receives one string per emitted
+		// Event, formatted "<type> <reason> <note>".
+		recorder *events.FakeRecorder
 		// uniqueID makes every ConfigSync and Namespace name distinct across
 		// specs. ConfigSync is cluster-scoped and namespaces cannot be cleaned
 		// up, so leftover objects from one spec would otherwise leak into the
@@ -71,9 +75,11 @@ var _ = Describe("ConfigSync Controller", func() {
 	)
 
 	BeforeEach(func() {
+		recorder = events.NewFakeRecorder(100)
 		reconciler = &ConfigSyncReconciler{
-			Client: k8sClient,
-			Scheme: k8sClient.Scheme(),
+			Recorder: recorder,
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
 		}
 		uniqueID++
 	})
@@ -325,7 +331,8 @@ var _ = Describe("ConfigSync Controller", func() {
 			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
 			Expect(err).NotTo(HaveOccurred())
 			flakyReconciler := &ConfigSyncReconciler{
-				Scheme: k8sClient.Scheme(),
+				Scheme:   k8sClient.Scheme(),
+				Recorder: recorder,
 				Client: interceptor.NewClient(watchClient, interceptor.Funcs{
 					Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 						if _, isConfigMap := obj.(*corev1.ConfigMap); isConfigMap && obj.GetNamespace() == flaky {
@@ -484,6 +491,89 @@ var _ = Describe("ConfigSync Controller", func() {
 			Expect(last).NotTo(BeNil())
 			Expect(last.LastTransitionTime).To(Equal(first.LastTransitionTime),
 				"lastTransitionTime moved without the condition changing")
+		})
+	})
+
+	Context("events", func() {
+		// drainEvents returns everything emitted so far without blocking, and
+		// empties the channel so the next call sees only newer events.
+		drainEvents := func() []string {
+			var got []string
+			for {
+				select {
+				case event := <-recorder.Events:
+					got = append(got, event)
+				default:
+					return got
+				}
+			}
+		}
+
+		It("emits Created per namespace, then nothing on a no-op reconcile", func() {
+			name := newName("ev-create")
+			namespaces := createNamespaces(newName("ns-a"), newName("ns-b"))
+			createConfigSync(name, map[string]string{testDataKey: testDataValue}, namespaces...)
+
+			reconcileOnce(name)
+			Expect(drainEvents()).To(ConsistOf(
+				"Normal Created Created ConfigMap in namespace "+namespaces[0],
+				"Normal Created Created ConfigMap in namespace "+namespaces[1],
+			))
+
+			By("staying silent when nothing changed")
+			reconcileOnce(name)
+			Expect(drainEvents()).To(BeEmpty())
+		})
+
+		It("emits Updated when the spec changes and Pruned when a namespace is dropped", func() {
+			name := newName("ev-update-prune")
+			namespaces := createNamespaces(newName("ns-keep"), newName("ns-drop"))
+			keep, drop := namespaces[0], namespaces[1]
+			createConfigSync(name, map[string]string{testDataKey: testDataValue}, keep, drop)
+			reconcileOnce(name)
+			drainEvents()
+
+			configSync := getConfigSync(name)
+			configSync.Spec.Data = map[string]string{testDataKey: "v2"}
+			configSync.Spec.TargetNamespaces = []string{keep}
+			Expect(k8sClient.Update(ctx, configSync)).To(Succeed())
+			reconcileOnce(name)
+
+			Expect(drainEvents()).To(ConsistOf(
+				"Normal Updated Updated ConfigMap in namespace "+keep,
+				"Normal Pruned Pruned ConfigMap from namespace "+drop+", which is no longer targeted",
+			))
+		})
+
+		It("emits a Warning when a foreign ConfigMap blocks a namespace", func() {
+			name := newName("ev-conflict")
+			namespaces := createNamespaces(newName("ns"))
+			Expect(k8sClient.Create(ctx, &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespaces[0]},
+				Data:       map[string]string{preciousKey: doNotTouchValue},
+			})).To(Succeed())
+			createConfigSync(name, map[string]string{testDataKey: testDataValue}, namespaces...)
+
+			reconcileOnce(name)
+
+			emitted := drainEvents()
+			Expect(emitted).To(HaveLen(1))
+			Expect(emitted[0]).To(HavePrefix("Warning " + reasonConfigMapNotOwned + " "))
+			Expect(emitted[0]).To(ContainSubstring(namespaces[0]))
+		})
+
+		It("emits a Warning when a sync fails", func() {
+			name := newName("ev-failure")
+			missing := newName("ns-missing")
+			createConfigSync(name, map[string]string{testDataKey: testDataValue}, missing)
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+			Expect(err).To(HaveOccurred())
+
+			emitted := drainEvents()
+			Expect(emitted).To(HaveLen(1))
+			Expect(emitted[0]).To(HavePrefix("Warning " + reasonSyncFailed + " "))
+			Expect(emitted[0]).To(ContainSubstring(missing))
 		})
 	})
 

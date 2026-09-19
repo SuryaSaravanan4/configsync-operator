@@ -17,6 +17,13 @@ rules:
   - update
   - watch
 - apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
   - platform.saravanan.dev
   resources:
   - configsyncs

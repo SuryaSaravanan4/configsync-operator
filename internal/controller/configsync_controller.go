@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -59,6 +60,15 @@ const (
 	reasonConfigMapNotOwned   = "ConfigMapNotOwned"
 	reasonSyncFailed          = "SyncFailed"
 
+	// Event-only reasons. Conflicts and failures reuse the condition reasons above.
+	reasonCreated = "Created"
+	reasonUpdated = "Updated"
+	reasonPruned  = "Pruned"
+
+	// Event actions, the verb the controller was performing.
+	actionSync  = "Sync"
+	actionPrune = "Prune"
+
 	// conflictRetryDelay is how long to wait before re-checking a namespace
 	// blocked by a foreign ConfigMap. See the end of Reconcile for why a plain
 	// watch cannot cover this case.
@@ -74,12 +84,16 @@ var errNotOwned = errors.New("existing ConfigMap is not owned by this ConfigSync
 type ConfigSyncReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// Recorder emits Kubernetes Events on the ConfigSync. It is required.
+	Recorder events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platform.saravanan.dev,resources=configsyncs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=platform.saravanan.dev,resources=configsyncs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platform.saravanan.dev,resources=configsyncs/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile materializes the ConfigSync's data as a ConfigMap in every target
 // namespace. It is level-triggered: it does not know why it was invoked, only
@@ -112,17 +126,31 @@ func (r *ConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// spec.targetNamespaces: a broken first namespace would stop a later one
 	// from ever being repaired.
 	for _, namespace := range configSync.Spec.TargetNamespaces {
-		err := r.syncNamespace(ctx, &configSync, namespace)
+		result, err := r.syncNamespace(ctx, &configSync, namespace)
 		switch {
 		case err == nil:
 			synced = append(synced, namespace)
+			// Events fire only on a real change, so a no-op reconcile is silent.
+			switch result {
+			case controllerutil.OperationResultCreated:
+				r.Recorder.Eventf(&configSync, nil, corev1.EventTypeNormal, reasonCreated, actionSync,
+					"Created ConfigMap in namespace %s", namespace)
+			case controllerutil.OperationResultUpdated:
+				r.Recorder.Eventf(&configSync, nil, corev1.EventTypeNormal, reasonUpdated, actionSync,
+					"Updated ConfigMap in namespace %s", namespace)
+			}
 		case errors.Is(err, errNotOwned):
 			log.Info("Refusing to adopt ConfigMap this controller did not create",
 				"namespace", namespace, "name", configSync.Name)
 			conflicts = append(conflicts, namespace)
+			r.Recorder.Eventf(&configSync, nil, corev1.EventTypeWarning, reasonConfigMapNotOwned, actionSync,
+				"Skipped namespace %s: a ConfigMap named %s already exists there and was not created by this controller",
+				namespace, configSync.Name)
 		default:
 			log.Error(err, "Failed to sync ConfigMap", "namespace", namespace, "name", configSync.Name)
 			failures = append(failures, fmt.Sprintf("%s: %v", namespace, err))
+			r.Recorder.Eventf(&configSync, nil, corev1.EventTypeWarning, reasonSyncFailed, actionSync,
+				"Failed to sync ConfigMap in namespace %s: %v", namespace, err)
 		}
 	}
 
@@ -160,13 +188,14 @@ func (r *ConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 
 // syncNamespace makes the ConfigMap in one namespace match the ConfigSync,
-// creating it if absent. It returns errNotOwned if a ConfigMap already holds the
-// name without being ours, having written nothing.
+// creating it if absent, and reports whether it created, updated or left the
+// object alone. It returns errNotOwned if a ConfigMap already holds the name
+// without being ours, having written nothing.
 func (r *ConfigSyncReconciler) syncNamespace(
 	ctx context.Context,
 	configSync *platformv1alpha1.ConfigSync,
 	namespace string,
-) error {
+) (controllerutil.OperationResult, error) {
 	// CreateOrUpdate needs an object carrying just the key. It Gets into this
 	// object, then hands it to the mutate function either empty (create path) or
 	// populated with the live state (update path).
@@ -178,7 +207,7 @@ func (r *ConfigSyncReconciler) syncNamespace(
 		},
 	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, configMap, func() error {
+	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, configMap, func() error {
 		// The ownership check lives inside the mutate function on purpose. If it
 		// ran before CreateOrUpdate, a foreign ConfigMap created in the window
 		// between our check and CreateOrUpdate's own Get would get clobbered.
@@ -209,7 +238,7 @@ func (r *ConfigSyncReconciler) syncNamespace(
 		return controllerutil.SetControllerReference(configSync, configMap, r.Scheme)
 	})
 
-	return err
+	return result, err
 }
 
 // pruneOrphans deletes ConfigMaps this ConfigSync owns that sit in namespaces
@@ -253,10 +282,14 @@ func (r *ConfigSyncReconciler) pruneOrphans(
 		if err := r.Delete(ctx, configMap); err != nil && !apierrors.IsNotFound(err) {
 			log.Error(err, "Failed to prune ConfigMap", "namespace", configMap.Namespace, "name", configMap.Name)
 			failures = append(failures, fmt.Sprintf("%s: prune: %v", configMap.Namespace, err))
+			r.Recorder.Eventf(configSync, nil, corev1.EventTypeWarning, reasonSyncFailed, actionPrune,
+				"Failed to prune ConfigMap from namespace %s: %v", configMap.Namespace, err)
 			continue
 		}
 		log.Info("Pruned ConfigMap from namespace no longer targeted",
 			"namespace", configMap.Namespace, "name", configMap.Name)
+		r.Recorder.Eventf(configSync, nil, corev1.EventTypeNormal, reasonPruned, actionPrune,
+			"Pruned ConfigMap from namespace %s, which is no longer targeted", configMap.Namespace)
 	}
 
 	return failures

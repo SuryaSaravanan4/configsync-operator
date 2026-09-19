@@ -107,6 +107,8 @@ no controller-manager) and covers:
 - Refusing to adopt or overwrite a ConfigMap that already exists but wasn't
   created by this controller
 - Status conditions and `observedGeneration` tracking
+- Kubernetes Events on create, update, prune, conflict and failure, and none on a
+  no-op reconcile (asserted with a fake recorder)
 
 Cascade deletion of ConfigMaps when the owning `ConfigSync` itself is deleted
 relies on Kubernetes' garbage collector reading the ownerRef — envtest doesn't
